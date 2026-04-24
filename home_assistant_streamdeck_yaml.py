@@ -677,6 +677,19 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
             " used in place of the dial's default PUSH action."
         ),
     )
+    refresh_every_secs: float = Field(
+        default=0.0,
+        allow_template=False,
+        description=(
+            "Poll interval in seconds for re-rendering the dial without"
+            " waiting on a Home Assistant `state_changed` event. Useful"
+            " for entities whose display depends on a value that ticks"
+            " silently (e.g. a `timer.*` ``remaining`` attribute, which"
+            " HA does not push per-second). ``0`` (the default) disables"
+            " polling — the dial still refreshes on state_changed and on"
+            " user interactions as before."
+        ),
+    )
 
     # vars for timer
     _timer: AsyncDelayedCallback | None = PrivateAttr(None)
@@ -1048,6 +1061,7 @@ class Config(BaseModel):
     _configuration_file: Path | None = PrivateAttr(default=None)
     _include_files: list[Path] = PrivateAttr(default_factory=list)
     _inactivity_task: asyncio.Task | None = PrivateAttr(default=None)
+    _dial_refresh_tasks: list = PrivateAttr(default_factory=list)
 
     @classmethod
     def load(
@@ -1639,6 +1653,55 @@ async def subscribe_state_changes(
     await websocket.send(json.dumps(subscribe_payload))
 
 
+async def _dial_refresh_loop(
+    dial: Dial,
+    deck: StreamDeck,
+    config: Config,
+    complete_state: StateDict,
+) -> None:
+    """Periodically re-render a single dial so its templates re-evaluate
+    against the current Home Assistant state without waiting on a
+    state_changed event. Used for dials whose display tracks something
+    that ticks silently (e.g. a timer's ``remaining`` attribute).
+    """
+    interval = max(float(dial.refresh_every_secs), 1.0)
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                current = config.current_page()
+                if dial not in current.dials:
+                    # Another page is active — nothing to render right now.
+                    continue
+                raw_index = current.dials.index(dial)
+                update_dial(deck, raw_index, config, complete_state)
+            except Exception as err:  # noqa: BLE001
+                console.log(f"Dial refresh loop hiccup: {err}")
+    except asyncio.CancelledError:
+        return
+
+
+def restart_dial_refresh_tasks(
+    config: Config,
+    deck: StreamDeck,
+    complete_state: StateDict,
+) -> None:
+    """(Re)create the periodic refresh task for every dial that has
+    ``refresh_every_secs`` set. Called at connection time and after
+    ``config.reload()``.
+    """
+    for task in config._dial_refresh_tasks:
+        task.cancel()
+    config._dial_refresh_tasks.clear()
+    for page in [*config.pages, *config.anonymous_pages]:
+        for dial in page.dials:
+            if dial.refresh_every_secs and dial.refresh_every_secs > 0:
+                task = asyncio.create_task(
+                    _dial_refresh_loop(dial, deck, config, complete_state),
+                )
+                config._dial_refresh_tasks.append(task)
+
+
 def reset_inactivity_timer(
     config: Config,
     deck: StreamDeck,
@@ -1701,6 +1764,7 @@ async def handle_changes(
                     deck.reset()
                     update_all_key_images(deck, config, complete_state)
                     update_all_dials(deck, config, complete_state)
+                    restart_dial_refresh_tasks(config, deck, complete_state)
                 except Exception as e:  # noqa: BLE001
                     console.log(f"Error reloading configuration: {e}")
 
@@ -3125,6 +3189,7 @@ async def _run_connection_session(
                 _on_press_callback(websocket, complete_state, config),
             )
             update_all_dials(deck, config, complete_state)
+            restart_dial_refresh_tasks(config, deck, complete_state)
             if deck.dial_count() != 0:
                 deck.set_dial_callback_async(
                     _on_dial_event_callback(websocket, complete_state, config),
