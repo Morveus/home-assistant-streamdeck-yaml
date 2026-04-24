@@ -892,6 +892,18 @@ class Page(BaseModel):
         description="A list of dials on the page.",
     )
 
+    sticky: bool = Field(
+        default=False,
+        description=(
+            "For anonymous pages only. When ``false`` (the default) any"
+            " button press on the detached page closes it and returns to"
+            " the parent page — good for quick-action menus. Set to"
+            " ``true`` on a remote-control style page (e.g. a TV remote)"
+            " so that pressing OK / arrows / menu keeps the page open;"
+            " the user then returns via an explicit navigation button."
+        ),
+    )
+
     _parent_page_index: int = PrivateAttr([])
 
     _dials_sorted: list[Dial] = PrivateAttr([])
@@ -2648,7 +2660,10 @@ async def _handle_key_press(  # noqa: PLR0912, PLR0915
         assert service is not None  # for mypy
         await call_service(websocket, service, service_data, target)
 
-    if config._detached_page:
+    # Auto-close the detached page after the action — skipped when the
+    # page declares ``sticky: true`` so that remote-control style menus
+    # keep serving subsequent presses.
+    if config._detached_page and not config._detached_page.sticky:
         config.close_detached_page()
         update_all()
 
