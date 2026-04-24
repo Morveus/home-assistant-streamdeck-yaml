@@ -662,6 +662,13 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
     # debounce inbound state_changed echoes during integration transitions.
     _last_service_call_at: float = PrivateAttr(0.0)
 
+    # Signed delta of the most recent TURN event (typically +1 or -1 per
+    # detent; a wider value is possible for fast rotations). Templates can
+    # consume this via the ``dial_turn()`` helper to pick between discrete
+    # commands such as ``DPAD_RIGHT`` / ``DPAD_LEFT`` rather than using
+    # ``dial_value()`` which reports the accumulated position.
+    _last_turn_delta: float = PrivateAttr(0.0)
+
     # Internal attributes for Dial
     _attributes: dict[str, float] = PrivateAttr(
         {"state": 0, "min": 0, "max": 100, "step": 1},
@@ -1856,6 +1863,20 @@ def _round(num: float, digits: int) -> int | float:
     return round(num, digits)
 
 
+def _dial_turn(dial: Dial | None) -> float:
+    """Template helper — signed delta of the most recent dial TURN event.
+
+    ``+1`` when the dial was turned clockwise one detent, ``-1`` for
+    counter-clockwise. Fast rotations can produce larger magnitudes. Use
+    the sign in templates to drive discrete commands, e.g.::
+
+        command: "{{ 'DPAD_RIGHT' if dial_turn() > 0 else 'DPAD_LEFT' }}"
+    """
+    if dial is None:
+        return 0
+    return float(getattr(dial, "_last_turn_delta", 0) or 0)
+
+
 def _dial_value(dial: Dial | None) -> float:
     if dial is None:
         return 0
@@ -1912,6 +1933,7 @@ def _render_jinja(
             round=_round,
             dial_value=ft.partial(_dial_value, dial=dial),
             dial_attr=ft.partial(_dial_attr, dial=dial),
+            dial_turn=ft.partial(_dial_turn, dial=dial),
         ).strip()
     except jinja2.exceptions.TemplateError as err:
         console.print_exception(show_locals=True)
@@ -2431,6 +2453,10 @@ async def handle_dial_event(
 
     if event_type == DialEventType.TURN:
         selected_dial.increment_state(value)
+        # Expose the raw delta to templates via ``dial_turn()`` — stored on
+        # the persistent (pre-render) dial so the next template render
+        # picks it up.
+        selected_dial._last_turn_delta = float(value)
     elif value:
         return
 
