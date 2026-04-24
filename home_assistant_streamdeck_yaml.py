@@ -2267,8 +2267,14 @@ def update_dial(
         if "event" in data and "data" in data["event"]:
             event_data = data["event"]["data"]
             new_state = event_data["new_state"]
-            dial.update_attributes(new_state)
-        else:
+            # Only refresh the cached state when the primary entity changed.
+            # `linked_entity` fires this path too (so templates re-evaluate),
+            # but its state (e.g. a switch "on"/"off") must not be coerced
+            # into the numeric dial state — that would blow up with
+            # ValueError on `float("on")`.
+            if new_state is not None and new_state.get("entity_id") == dial.entity_id:
+                dial.update_attributes(new_state)
+        elif data.get("entity_id") == dial.entity_id:
             dial.update_attributes(data)
 
     size_per_dial = _get_size_per_dial(deck)
