@@ -665,6 +665,18 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
             " `0` (the default) preserves the pre-existing behaviour."
         ),
     )
+    long_press: dict[str, Any] | None = Field(
+        default=None,
+        allow_template=True,
+        description=(
+            "Long-press action for PUSH dial events — same shape as the"
+            " `Button.long_press` field. Recognised keys: `service`,"
+            " `service_data`, `entity_id`, `target`. When the user holds"
+            " the dial for at least `long_press_duration` seconds (from"
+            " the top-level config) before releasing it, these keys are"
+            " used in place of the dial's default PUSH action."
+        ),
+    )
 
     # vars for timer
     _timer: AsyncDelayedCallback | None = PrivateAttr(None)
@@ -2464,6 +2476,7 @@ async def handle_dial_event(
     event_type: DialEventType,
     value: int,
     local_update: bool = False,  # noqa: FBT001, FBT002
+    is_long_press: bool = False,  # noqa: FBT001, FBT002
 ) -> None:
     """Handles dial_event."""
     if not config._is_on:
@@ -2494,25 +2507,44 @@ async def handle_dial_event(
     # Keep a reference to the persistent (pre-render) dial so the timestamp
     # sticks on the object that state_changed handlers will look up later.
     original_dial = selected_dial
-    if selected_dial.service is not None:
+    service = selected_dial.service
+    target = selected_dial.target
+    service_data = selected_dial.service_data
+    # Long-press PUSH override — mirrors the Button.long_press contract:
+    # keys `service`, `service_data`, `entity_id`, `target` supplant the
+    # default PUSH action when the user holds the dial long enough.
+    if is_long_press and selected_dial.long_press:
+        lp = selected_dial.long_press
+        service = lp.get("service") or service
+        if "service_data" in lp:
+            service_data = lp.get("service_data")
+        if "entity_id" in lp and service_data is None:
+            service_data = {"entity_id": lp["entity_id"]}
+        target = lp.get("target", target)
+
+    if service is not None:
         selected_dial = selected_dial.rendered_template_dial(complete_state)
-        service_data = (
-            {"entity_id": selected_dial.entity_id}
-            if selected_dial.service_data is None
-            else selected_dial.service_data
-        )
+        if service_data is None:
+            service_data = (
+                {"entity_id": selected_dial.entity_id}
+                if selected_dial.service_data is None
+                else selected_dial.service_data
+            )
 
     # Ensures the entity id is given to the service even if service_data is set
-    if "entity_id" not in service_data:
+    if service_data is None:
+        service_data = {}
+    if "entity_id" not in service_data and selected_dial.entity_id is not None:
         service_data["entity_id"] = selected_dial.entity_id
 
-    assert selected_dial.service is not None
+    assert service is not None
     if local_update:
         assert isinstance(dial_num_sorted, int)
         update_dial(deck, dial_num_sorted, config, complete_state)
         return
     console.log(
-        f"Calling service {selected_dial.service} with data {selected_dial.service_data}",
+        f"Calling service {service} with data {service_data}"
+        + (" (long press)" if is_long_press else ""),
     )
     # Stamp the moment the outgoing service call is issued so inbound
     # state_changed events can be suppressed during the configured
@@ -2520,9 +2552,9 @@ async def handle_dial_event(
     original_dial._last_service_call_at = time.monotonic()
     await call_service(
         websocket,
-        selected_dial.service,
+        service,
         service_data,
-        selected_dial.target,
+        target,
     )
 
 
@@ -2534,6 +2566,10 @@ def _on_dial_event_callback(
     [StreamDeck, int, DialEventType, int],
     Coroutine[StreamDeck, int, None],
 ]:
+    # Press timestamps for dial PUSH events, keyed by physical dial index.
+    # Used to distinguish a tap from a hold on release.
+    dial_push_start: dict[int, float] = {}
+
     async def dial_event_callback(
         deck: StreamDeck,
         dial_num: int,
@@ -2546,6 +2582,20 @@ def _on_dial_event_callback(
         reset_inactivity_timer(config, deck)
         dial = config.dial_sorted(dial_num)
         assert dial is not None
+
+        is_long_press = False
+        if event_type == DialEventType.PUSH:
+            if value:
+                # Press — record timestamp and wait for the release event.
+                dial_push_start[dial_num] = time.time()
+                return
+            # Release — compute duration and decide short vs long.
+            press_duration = time.time() - dial_push_start.pop(dial_num, time.time())
+            is_long_press = press_duration >= config.long_press_duration
+            console.log(
+                f"Dial {dial_num} PUSH released after {press_duration:.2f}s"
+                + (" (long press)" if is_long_press else ""),
+            )
 
         async def callback() -> None:
             await handle_dial_event(
@@ -2583,6 +2633,7 @@ def _on_dial_event_callback(
             deck,
             event_type,
             value,
+            is_long_press=is_long_press,
         )
 
     return dial_event_callback
