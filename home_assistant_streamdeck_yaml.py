@@ -762,8 +762,15 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
             text = dial.text
             text_color = dial.text_color or "white"
 
-            assert dial.entity_id is not None
-            if complete_state[dial.entity_id]["state"] == "off" and dial.icon_gray_when_off:
+            # Dials driving pure service calls (e.g. a d-pad `remote.send_command`)
+            # don't need an ``entity_id`` — their LCD render only uses the icon
+            # and text from the config. Skip the grayscale-on-off check in that
+            # case rather than asserting and falling into the failed-icon path.
+            if (
+                dial.entity_id is not None
+                and complete_state.get(dial.entity_id, {}).get("state") == "off"
+                and dial.icon_gray_when_off
+            ):
                 icon_convert_to_grayscale = True
 
             if image is None:
