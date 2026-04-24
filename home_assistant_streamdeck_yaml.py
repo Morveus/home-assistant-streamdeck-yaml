@@ -706,7 +706,18 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
             self._attributes = self.attributes
 
         if self.state_attribute is None:
-            self._attributes.update({"state": float(data["state"])})
+            try:
+                self._attributes.update({"state": float(data["state"])})
+            except (TypeError, ValueError):
+                # Non-numeric primary state (e.g. `switch` → on/off,
+                # `timer` → active/idle). The dial in question doesn't rely
+                # on `dial_value()` anyway — templates read the HA state
+                # directly — so fall back to 0 and keep rendering.
+                console.log(
+                    f"State '{data.get('state')}' for {data.get('entity_id')}"
+                    " is not numeric — keeping dial state at 0",
+                )
+                self._attributes["state"] = 0
         else:
             try:
                 if data["attributes"][self.state_attribute] is None:
@@ -717,6 +728,12 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
                     )
             except KeyError:
                 console.log(f"Could not find attribute {self.state_attribute}")
+                self._attributes["state"] = 0
+            except (TypeError, ValueError):
+                console.log(
+                    f"Attribute {self.state_attribute} on {data.get('entity_id')}"
+                    " is not numeric — keeping dial state at 0",
+                )
                 self._attributes["state"] = 0
 
     def get_attributes(self) -> dict[str, float]:
