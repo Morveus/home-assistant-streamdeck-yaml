@@ -2545,8 +2545,17 @@ async def handle_dial_event(
 
     assert service is not None
     if local_update:
-        assert isinstance(dial_num_sorted, int)
-        update_dial(deck, dial_num_sorted, config, complete_state)
+        # ``update_dial`` internally looks up the dial via
+        # ``config.dial(key)`` which indexes the raw dials list — passing a
+        # sorted-slot index here would fetch the wrong dial as soon as any
+        # PUSH dial is present in the same page. Resolve the raw index of
+        # the TURN dial we're actually updating.
+        try:
+            raw_index = config.current_page().dials.index(original_dial)
+        except ValueError:
+            raw_index = None
+        if raw_index is not None:
+            update_dial(deck, raw_index, config, complete_state)
         return
     console.log(
         f"Calling service {service} with data {service_data}"
