@@ -182,6 +182,18 @@ class _ButtonDialBase(BaseModel, extra="forbid"):  # type: ignore[call-arg]
         allow_template=False,
         description="When specifying `icon` and `entity_id`, if the state is `off`, the icon will be converted to grayscale.",
     )
+    icon_mdi_margin: int = Field(
+        default=0,
+        allow_template=False,
+        description=(
+            "Extra pixels of inner padding around a Material Design Icon"
+            " rendered on the button / dial. Positive values shrink the"
+            " visible glyph (useful to tone down oversized MDI icons);"
+            " on a 72x72 button a margin of 4 pixels trims the icon by"
+            " roughly 10%. Has no effect when using a file / URL / ring"
+            " icon — only the MDI renderer honours the margin."
+        ),
+    )
     delay: float | str = Field(
         default=0.0,
         allow_template=True,
@@ -436,7 +448,7 @@ class Button(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
                 icon_background_color=button.icon_background_color,
                 icon_filename=button.icon,
                 icon_mdi=icon_mdi,
-                icon_mdi_margin=icon_mdi_margin,
+                icon_mdi_margin=button.icon_mdi_margin or icon_mdi_margin,
                 icon_mdi_color=_named_to_hex(button.icon_mdi_color or text_color),
                 size=size,
             ).copy()  # copy to avoid modifying the cached image
@@ -778,7 +790,7 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
                     icon_background_color=dial.icon_background_color,
                     icon_filename=dial.icon,
                     icon_mdi=dial.icon_mdi,
-                    icon_mdi_margin=icon_mdi_margin,
+                    icon_mdi_margin=dial.icon_mdi_margin or icon_mdi_margin,
                     icon_mdi_color=_named_to_hex(dial.icon_mdi_color or text_color),
                     size=size,
                 ).copy()
