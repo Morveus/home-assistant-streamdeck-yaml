@@ -2507,33 +2507,39 @@ async def handle_dial_event(
     # Keep a reference to the persistent (pre-render) dial so the timestamp
     # sticks on the object that state_changed handlers will look up later.
     original_dial = selected_dial
+    if selected_dial.service is not None:
+        selected_dial = selected_dial.rendered_template_dial(complete_state)
+        service_data = (
+            {"entity_id": selected_dial.entity_id}
+            if selected_dial.service_data is None
+            else selected_dial.service_data
+        )
+
+    # Defaults read from the (now rendered) dial so Jinja templates in
+    # service / service_data / target are already evaluated.
     service = selected_dial.service
     target = selected_dial.target
-    service_data = selected_dial.service_data
+
     # Long-press PUSH override — mirrors the Button.long_press contract:
     # keys `service`, `service_data`, `entity_id`, `target` supplant the
-    # default PUSH action when the user holds the dial long enough.
+    # default PUSH action when the user holds the dial long enough. The
+    # values here come from the rendered dial, so any Jinja inside the
+    # long_press dict is already substituted.
     if is_long_press and selected_dial.long_press:
         lp = selected_dial.long_press
         service = lp.get("service") or service
-        if "service_data" in lp:
-            service_data = lp.get("service_data")
-        if "entity_id" in lp and service_data is None:
-            service_data = {"entity_id": lp["entity_id"]}
-        target = lp.get("target", target)
+        if "service_data" in lp and lp["service_data"] is not None:
+            service_data = lp["service_data"]
+        if "entity_id" in lp:
+            if service_data is None:
+                service_data = {}
+            service_data["entity_id"] = lp["entity_id"]
+        if "target" in lp:
+            target = lp["target"]
 
-    if service is not None:
-        selected_dial = selected_dial.rendered_template_dial(complete_state)
-        if service_data is None:
-            service_data = (
-                {"entity_id": selected_dial.entity_id}
-                if selected_dial.service_data is None
-                else selected_dial.service_data
-            )
-
-    # Ensures the entity id is given to the service even if service_data is set
     if service_data is None:
         service_data = {}
+    # Ensures the entity id is given to the service even if service_data is set
     if "entity_id" not in service_data and selected_dial.entity_id is not None:
         service_data["entity_id"] = selected_dial.entity_id
 
