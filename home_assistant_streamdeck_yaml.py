@@ -2623,7 +2623,18 @@ def _on_dial_event_callback(
                 0,
             )
 
-        current_dial = config.dial(dial_num)
+        # ``dial_num`` is the physical slot (i.e. index into ``_dials_sorted``)
+        # which matches the raw dial index only when no PUSH siblings are
+        # present. Once PUSH entries are inserted, ``config.dial(dial_num)``
+        # returns the wrong dial (often a PUSH one with ``delay=0``) and the
+        # TURN debounce collapses. Pick the TURN dial directly from the pair.
+        current_dial = (
+            dial[0]
+            if dial[0].dial_event_type == DialEventType.TURN.name
+            else dial[1]
+        )
+        if current_dial is None:
+            current_dial = dial[0]
         assert isinstance(current_dial, Dial)
         if event_type == DialEventType.TURN and current_dial.start_or_restart_timer(
             callback,
