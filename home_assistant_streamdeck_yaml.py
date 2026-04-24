@@ -1987,6 +1987,49 @@ def _round(num: float, digits: int) -> int | float:
     return round(num, digits)
 
 
+def _now_ts() -> float:
+    """Template helper — current UNIX timestamp in seconds (``time.time()``)."""
+    return time.time()
+
+
+def _parse_ts(value: Any) -> float:
+    """Template helper — parse a Home Assistant ISO-8601 timestamp string
+    (for example the ``finishes_at`` attribute of a timer) into UNIX
+    seconds. Accepts ``datetime`` objects unchanged. Returns ``0`` on
+    anything we can't parse so templates can fall back gracefully.
+    """
+    import datetime as _dt
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, _dt.datetime):
+        return value.timestamp()
+    try:
+        # HA emits "...+00:00"; Python handles that directly from 3.11+.
+        dt = _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _fmt_hms(total_secs: Any) -> str:
+    """Template helper — format a seconds count as ``H:MM:SS`` (zero-padded
+    minutes and seconds, hours left unpadded to match HA's convention for
+    timer remaining values). Negative or non-numeric input yields
+    ``"0:00:00"`` so templates stay defensive.
+    """
+    try:
+        s = int(float(total_secs))
+    except (TypeError, ValueError):
+        return "0:00:00"
+    if s < 0:
+        s = 0
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
 def _dial_turn(dial: Dial | None) -> float:
     """Template helper — signed delta of the most recent dial TURN event.
 
@@ -2058,6 +2101,9 @@ def _render_jinja(
             dial_value=ft.partial(_dial_value, dial=dial),
             dial_attr=ft.partial(_dial_attr, dial=dial),
             dial_turn=ft.partial(_dial_turn, dial=dial),
+            now_ts=_now_ts,
+            parse_ts=_parse_ts,
+            fmt_hms=_fmt_hms,
         ).strip()
     except jinja2.exceptions.TemplateError as err:
         console.print_exception(show_locals=True)
