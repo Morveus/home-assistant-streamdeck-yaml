@@ -592,6 +592,10 @@ class Button(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
                     (int, float),
                 ), f"Invalid delay: {self.delay}"
                 self._timer = AsyncDelayedCallback(delay=self.delay, callback=callback)
+            # The callback closes over the websocket of the session that
+            # created it; refresh it so a reconnect doesn't leave the timer
+            # sending on a dead connection.
+            self._timer.callback = callback
             if self._timer.is_running():
                 self._timer.cancel()
             else:
@@ -873,6 +877,8 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
                 (int, float),
             ), f"Invalid delay: {self.delay}"
             self._timer = AsyncDelayedCallback(delay=self.delay, callback=callback)
+        # See Button.maybe_start_or_cancel_timer: keep the latest session's callback.
+        self._timer.callback = callback
         self._timer.start()
         return True
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -542,3 +543,21 @@ def test_get_size_per_dial(mock_deck_plus: Mock) -> None:
         StreamDeckPlus.TOUCHSCREEN_PIXEL_WIDTH / mock_deck_plus.dial_count(),
         StreamDeckPlus.TOUCHSCREEN_PIXEL_HEIGHT,
     )
+
+
+async def test_dial_timer_uses_latest_callback() -> None:
+    """A reconnect hands the dial a new callback; the timer must use it."""
+    dial = Dial(entity_id="light.x", service="light.turn_on", delay=0.01)
+    calls: list[str] = []
+
+    async def old_session() -> None:
+        calls.append("old")
+
+    async def new_session() -> None:
+        calls.append("new")
+
+    assert dial.start_or_restart_timer(old_session)
+    await asyncio.sleep(0.05)
+    assert dial.start_or_restart_timer(new_session)
+    await asyncio.sleep(0.05)
+    assert calls == ["old", "new"]
