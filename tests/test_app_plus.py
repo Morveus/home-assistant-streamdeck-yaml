@@ -375,6 +375,35 @@ async def test_touchscreen(
     assert attributes["state"] is not attributes["min"]
 
 
+async def test_touchscreen_swipe_targets(
+    mock_deck_plus: Mock,
+    websocket_mock: Mock,
+    state: dict[str, dict[str, Any]],
+    dials: list[Dial],
+) -> None:
+    """Test that `swipe_left` and `swipe_right` choose the page to go to."""
+    home = Page(name="home", dials=dials, swipe_right="remote")
+    other = Page(name="other", dials=dials)
+    remote = Page(name="remote", dials=dials, swipe_left="home")
+    config = Config(pages=[home, other], anonymous_pages=[remote])
+    touch_event = _on_touchscreen_event_callback(websocket_mock, state, config)
+    left_to_right = {"x": 0, "y": 0, "x_out": 100, "y_out": 0}
+    right_to_left = {"x": 100, "y": 0, "x_out": 0, "y_out": 0}
+
+    # Left to right on home opens the anonymous remote page.
+    await touch_event(mock_deck_plus, TouchscreenEventType.DRAG, left_to_right)
+    assert config.current_page() == remote
+
+    # Right to left on the remote page goes back to home.
+    await touch_event(mock_deck_plus, TouchscreenEventType.DRAG, right_to_left)
+    assert config.current_page() == home
+    assert config._detached_page is None
+
+    # Without a target, right to left still goes to the next page.
+    await touch_event(mock_deck_plus, TouchscreenEventType.DRAG, right_to_left)
+    assert config.current_page() == other
+
+
 def test_update_all_dials_partial_and_no_dials(mock_deck_plus: Mock) -> None:  # noqa: PLR0915
     """Test updating partial dials and clearing unconfigured dial slots."""
     # Create dials programmatically for input_number entities

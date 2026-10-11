@@ -971,6 +971,24 @@ class Page(BaseModel):
         ),
     )
 
+    swipe_left: int | str | None = Field(
+        default=None,
+        description=(
+            "Page (name or index) to go to when swiping from right to left on"
+            " the Stream Deck+ touchscreen. When unset, swiping right to left"
+            " goes to the next page."
+        ),
+    )
+
+    swipe_right: int | str | None = Field(
+        default=None,
+        description=(
+            "Page (name or index) to go to when swiping from left to right on"
+            " the Stream Deck+ touchscreen. When unset, swiping left to right"
+            " goes to the previous page."
+        ),
+    )
+
     _parent_page_index: int = PrivateAttr([])
 
     _dials_sorted: list[Dial] = PrivateAttr([])
@@ -2562,14 +2580,18 @@ def _on_touchscreen_event_callback(
         console.log(f"Touchscreen event {event_type} called at value {value}")
         reset_inactivity_timer(config, deck)
         if event_type == TouchscreenEventType.DRAG:
-            # go to next or previous page
+            # go to the page's swipe target, or to the next or previous page
+            page = config.current_page()
             if value["x"] > value["x_out"]:
-                console.log(f"Going to page {config.next_page_index}")
-                config.to_page(config.next_page_index)
-
+                target = page.swipe_left
+                if target is None:
+                    target = config.next_page_index
             else:
-                console.log(f"Going to page {config.next_page_index}")
-                config.to_page(config.previous_page_index)
+                target = page.swipe_right
+                if target is None:
+                    target = config.previous_page_index
+            console.log(f"Going to page {target}")
+            config.to_page(target)
             config.current_page().sort_dials()
             update_all_key_images(deck, config, complete_state)
             update_all_dials(deck, config, complete_state)
