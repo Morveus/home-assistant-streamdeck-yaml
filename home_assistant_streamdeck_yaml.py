@@ -18,6 +18,7 @@ import sys
 import time
 import warnings
 from contextlib import asynccontextmanager
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import (
@@ -1794,12 +1795,25 @@ async def handle_changes(
 
             await asyncio.sleep(1)
 
-    # Run the websocket message processing and timer update tasks concurrently
-    await asyncio.gather(
-        process_websocket_messages(),
-        call_update_timers(),
-        watch_configuration_file(),
-    )
+    # Run the websocket message processing and timer update tasks concurrently.
+    # When the websocket dies, ``process_websocket_messages`` raises; the two
+    # sibling loops must die with it. ``asyncio.gather`` does not cancel them,
+    # so without this every reconnect leaked a config watcher and a timer loop
+    # bound to that session's state. On the next config reload each leaked
+    # watcher restarted the dial refresh tasks with its own stale snapshot,
+    # and the last one to run won: a dial (e.g. a timer) then kept repainting
+    # an old state every second.
+    tasks = [
+        asyncio.create_task(process_websocket_messages()),
+        asyncio.create_task(call_update_timers()),
+        asyncio.create_task(watch_configuration_file()),
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _keys(entity_id: str, buttons: list[Button] | list[Dial]) -> list[int]:
@@ -2135,16 +2149,74 @@ def _render_jinja(
         return text
 
 
-async def get_states(websocket: websockets.ClientConnection) -> dict[str, Any]:
-    """Get the current state of all entities."""
+async def get_states(
+    websocket: websockets.ClientConnection,
+    pending_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Get the current state of all entities.
+
+    Only the ``result`` carrying this request's id is taken as the snapshot
+    (the ``subscribe_events`` acknowledgement is a ``result`` too). Events
+    received while waiting are appended to ``pending_events`` when given, so
+    a caller that subscribed first loses no change; see
+    :func:`_merge_pending_events`.
+    """
     _id = _next_id()
     subscribe_payload = {"type": "get_states", "id": _id}
     await websocket.send(json.dumps(subscribe_payload))
     while True:
         data = json.loads(await websocket.recv())
-        if data["type"] == "result":
+        if data.get("type") == "result" and data.get("id") == _id:
             # Extract the state data from the response
             return {state["entity_id"]: state for state in data["result"]}
+        if data.get("type") == "event" and pending_events is not None:
+            pending_events.append(data)
+
+
+def _state_timestamp(state: dict[str, Any] | None) -> datetime | None:
+    """Return the ``last_updated`` of a Home Assistant state, if parseable."""
+    if not state:
+        return None
+    value = state.get("last_updated") or state.get("last_changed")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _merge_pending_events(
+    snapshot: StateDict,
+    pending_events: list[dict[str, Any]],
+) -> None:
+    """Apply ``state_changed`` events received while fetching ``snapshot``.
+
+    An event only wins when it is not older than the snapshot's own entry,
+    so a buffered event can never roll the snapshot back.
+    """
+    for data in pending_events:
+        event = data.get("event", {})
+        if event.get("event_type") != "state_changed":
+            continue
+        event_data = event.get("data", {})
+        eid = event_data.get("entity_id")
+        if eid is None:
+            continue
+        new_state = event_data.get("new_state")
+        current = snapshot.get(eid)
+        if new_state is None:
+            old_ts = _state_timestamp(event_data.get("old_state"))
+            cur_ts = _state_timestamp(current)
+            if current is not None and (
+                cur_ts is None or (old_ts is not None and old_ts >= cur_ts)
+            ):
+                snapshot.pop(eid, None)
+            continue
+        new_ts = _state_timestamp(new_state)
+        cur_ts = _state_timestamp(current)
+        if current is None or cur_ts is None or (new_ts is not None and new_ts >= cur_ts):
+            snapshot[eid] = new_state
 
 
 async def unsubscribe(websocket: websockets.ClientConnection, id_: int) -> None:
@@ -3242,11 +3314,29 @@ async def _run_connection_session(
     deck: StreamDeck,
     *,
     allow_weaker_ssl: bool = False,
+    complete_state: StateDict | None = None,
 ) -> None:
-    """Handles a single connection session with Home Assistant."""
+    """Handles a single connection session with Home Assistant.
+
+    ``complete_state`` is the process-wide state cache. It is refreshed IN
+    PLACE from Home Assistant at every (re)connection, so every closure that
+    holds it (key, dial and touchscreen callbacks, dial refresh loops) always
+    sees the authoritative state. While disconnected it keeps the last known
+    values instead of falling back to an empty (``off``-looking) state.
+    """
+    if complete_state is None:
+        complete_state = {}
     async with setup_ws(host, token, protocol, allow_weaker_ssl=allow_weaker_ssl) as websocket:
         try:
-            complete_state = await get_states(websocket)
+            # Subscribe BEFORE reading the snapshot: a change that lands in
+            # between is buffered and merged instead of being lost until the
+            # entity changes again.
+            await subscribe_state_changes(websocket)
+            pending_events: list[dict[str, Any]] = []
+            snapshot = await get_states(websocket, pending_events)
+            _merge_pending_events(snapshot, pending_events)
+            complete_state.clear()
+            complete_state.update(snapshot)
 
             # Sync brightness from HA entity if configured
             _sync_brightness_from_entity(
@@ -3273,7 +3363,6 @@ async def _run_connection_session(
                     _on_touchscreen_event_callback(websocket, complete_state, config),
                 )
 
-            await subscribe_state_changes(websocket)
             await handle_changes(websocket, complete_state, deck, config)
         finally:
             console.log("Cleaning up connection session...")
@@ -3294,6 +3383,8 @@ async def run(
     """Main entry point for the Stream Deck integration, with retry logic."""
     deck.set_brightness(config.brightness)
     attempt = 0
+    # Shared by every connection session, refreshed in place on reconnect.
+    complete_state: StateDict = {}
 
     while retry_attempts < 0 or attempt <= retry_attempts:
         try:
@@ -3305,6 +3396,7 @@ async def run(
                 config,
                 deck,
                 allow_weaker_ssl=allow_weaker_ssl,
+                complete_state=complete_state,
             )
             console.log("Connection session ended cleanly.")
             break
