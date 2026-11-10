@@ -995,23 +995,24 @@ class Page(BaseModel):
     _dials_sorted: list[Dial] = PrivateAttr([])
 
     def sort_dials(self) -> list[tuple[Dial, Dial | None]]:
-        """Sorts dials by dialEventType."""
-        self._dials_sorted = []
-        skip = False
-        for index, dial in enumerate(self.dials):
-            if index + 1 < len(self.dials):
-                if skip:
-                    skip = False
-                    continue
+        """Group dial entries into physical dials.
 
-                next_dial = self.dials[index + 1]
-                if dial.dial_event_type != next_dial.dial_event_type:
-                    self._dials_sorted.append((dial, next_dial))  # type: ignore[arg-type]
-                    skip = True
-                else:
-                    self._dials_sorted.append((dial, None))  # type: ignore[arg-type]
+        Two consecutive entries with different ``dial_event_type`` (a TURN and
+        a PUSH) form one physical dial; any other entry stands alone. An entry
+        already paired with its predecessor is never added a second time, even
+        when it is the last entry of the page.
+        """
+        self._dials_sorted = []
+        index = 0
+        while index < len(self.dials):
+            dial = self.dials[index]
+            next_dial = self.dials[index + 1] if index + 1 < len(self.dials) else None
+            if next_dial is not None and dial.dial_event_type != next_dial.dial_event_type:
+                self._dials_sorted.append((dial, next_dial))  # type: ignore[arg-type]
+                index += 2
             else:
                 self._dials_sorted.append((dial, None))  # type: ignore[arg-type]
+                index += 1
         return self._dials_sorted  # type: ignore[return-value]
 
     def get_sorted_key(self, dial: Dial) -> int | None:

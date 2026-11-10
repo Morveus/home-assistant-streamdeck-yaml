@@ -590,3 +590,26 @@ async def test_dial_timer_uses_latest_callback() -> None:
     assert dial.start_or_restart_timer(new_session)
     await asyncio.sleep(0.05)
     assert calls == ["old", "new"]
+
+
+def test_sort_dials_last_push_not_duplicated() -> None:
+    """A PUSH paired with the preceding TURN must not become a phantom dial."""
+    page = Page(
+        name="p",
+        dials=[
+            Dial(entity_id="input_number.a", dial_event_type="TURN"),
+            Dial(entity_id="input_number.a", dial_event_type="PUSH"),
+            Dial(entity_id="input_number.b", dial_event_type="TURN"),
+            Dial(entity_id="input_number.c", dial_event_type="TURN"),
+            Dial(entity_id="input_number.c", dial_event_type="PUSH"),
+        ],
+    )
+    sorted_dials = page.sort_dials()
+    assert [(a.entity_id, b.entity_id if b else None) for a, b in sorted_dials] == [
+        ("input_number.a", "input_number.a"),
+        ("input_number.b", None),
+        ("input_number.c", "input_number.c"),
+    ]
+    # A trailing lone entry is still kept.
+    page.dials.append(Dial(entity_id="input_number.d", dial_event_type="TURN"))
+    assert len(page.sort_dials()) == 4  # noqa: PLR2004
