@@ -23,6 +23,7 @@ from home_assistant_streamdeck_yaml import (
     _get_size_per_dial,
     _on_dial_event_callback,
     _on_touchscreen_event_callback,
+    _render_jinja,
     _update_state,
     update_all_dials,
     update_dial,
@@ -613,3 +614,76 @@ def test_sort_dials_last_push_not_duplicated() -> None:
     # A trailing lone entry is still kept.
     page.dials.append(Dial(entity_id="input_number.d", dial_event_type="TURN"))
     assert len(page.sort_dials()) == 4  # noqa: PLR2004
+
+
+def test_turn_acceleration_up_only() -> None:
+    """Fast clockwise detents accelerate; counter-clockwise keeps the base step."""
+    dial = Dial(
+        entity_id="timer.t",
+        dial_event_type="TURN",
+        turn_acceleration={"direction": "up", "reset_secs": 0.25},
+    )
+    # Fast run clockwise: x1 for 3 detents, then x2, x3, … up to x6.
+    mults = [dial.register_turn(1, now=0.1 * i) for i in range(20)]
+    assert mults[:7] == [1, 1, 1, 2, 2, 2, 3]
+    assert max(mults) == 6  # noqa: PLR2004
+    # A pause longer than reset_secs falls back to the base step.
+    assert dial.register_turn(1, now=2.0 + 0.3) == 1
+    # Multi-detent events count every detent of the run.
+    assert dial.register_turn(3, now=2.4) == 2  # noqa: PLR2004
+    # Counter-clockwise never accelerates, however fast.
+    downs = [dial.register_turn(-1, now=3.0 + 0.05 * i) for i in range(20)]
+    assert downs == [1] * 20
+    # Back clockwise right after: a change of direction restarts the run.
+    assert dial.register_turn(1, now=4.01) == 1
+    # A replayed debounced event (value 0) changes nothing.
+    assert dial.register_turn(0, now=4.02) == 1
+
+
+def test_turn_acceleration_disabled_and_template() -> None:
+    """Without ``turn_acceleration`` the multiplier stays 1, the helper reads it."""
+    plain = Dial(entity_id="timer.t", dial_event_type="TURN")
+    assert [plain.register_turn(1, now=0.01 * i) for i in range(10)] == [1] * 10
+    assert _render_jinja("{{ dial_turn_multiplier() }}", {}, plain) == "1"
+
+    fast = Dial(
+        entity_id="timer.t",
+        dial_event_type="TURN",
+        turn_acceleration={"ticks_per_level": 1, "max_multiplier": 4},
+    )
+    for i in range(10):
+        fast.register_turn(1, now=0.01 * i)
+    fast._last_turn_delta = 1.0
+    tpl = "{{ 300 * dial_turn_multiplier() if dial_turn() > 0 else -300 }}"
+    assert _render_jinja(tpl, {}, fast) == "1200"
+
+
+async def test_turn_acceleration_service_call(
+    mock_deck_plus: Mock,
+    websocket_mock: Mock,
+) -> None:
+    """A fast clockwise run sends growing steps; counter-clockwise stays fixed."""
+    dial = Dial(
+        entity_id="timer.t",
+        dial_event_type="TURN",
+        service="timer.change",
+        service_data={
+            "entity_id": "timer.t",
+            "duration": "{{ 300 * dial_turn_multiplier() if dial_turn() > 0 else -300 }}",
+        },
+        turn_acceleration={"direction": "up", "ticks_per_level": 2},
+    )
+    config = Config(pages=[Page(name="home", dials=[dial])])
+    config.current_page().sort_dials()
+    dial_event = _on_dial_event_callback(websocket_mock, {}, config)
+    sent: list[str] = []
+
+    async def fake_call_service(_ws: Any, _service: str, data: dict, _target: Any) -> None:
+        sent.append(data["duration"])
+
+    with patch("home_assistant_streamdeck_yaml.call_service", fake_call_service):
+        for _ in range(5):
+            await dial_event(mock_deck_plus, 0, DialEventType.TURN, 1)
+        for _ in range(5):
+            await dial_event(mock_deck_plus, 0, DialEventType.TURN, -1)
+    assert sent == ["300", "300", "600", "600", "900"] + ["-300"] * 5

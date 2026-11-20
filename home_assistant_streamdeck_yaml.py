@@ -696,6 +696,23 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
         ),
     )
 
+    turn_acceleration: dict[str, Any] | None = Field(
+        default=None,
+        allow_template=False,
+        description=(
+            "Accelerates fast rotations: consecutive detents in the same"
+            " direction, each within `reset_secs` of the previous one, grow"
+            " the multiplier returned by the `dial_turn_multiplier()` template"
+            " helper by one every `ticks_per_level` detents, up to"
+            " `max_multiplier`. A pause longer than `reset_secs` or a change"
+            " of direction brings it back to `1`. `direction` picks which"
+            " rotations accelerate: `up` (clockwise, the default), `down` or"
+            " `both`; the other direction always reports `1`. Defaults:"
+            " `reset_secs: 0.25`, `ticks_per_level: 3`, `max_multiplier: 6`."
+            " `null` (the default) disables acceleration."
+        ),
+    )
+
     # vars for timer
     _timer: AsyncDelayedCallback | None = PrivateAttr(None)
 
@@ -710,6 +727,14 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
     # commands such as ``DPAD_RIGHT`` / ``DPAD_LEFT`` rather than using
     # ``dial_value()`` which reports the accumulated position.
     _last_turn_delta: float = PrivateAttr(0.0)
+
+    # Acceleration bookkeeping for ``turn_acceleration`` (see
+    # ``register_turn``): length of the current fast run of detents, time
+    # and sign of the latest detent, and the resulting multiplier.
+    _turn_streak: int = PrivateAttr(0)
+    _turn_last_at: float = PrivateAttr(0.0)
+    _turn_last_sign: int = PrivateAttr(0)
+    _turn_multiplier: int = PrivateAttr(1)
 
     # Internal attributes for Dial
     _attributes: dict[str, float] = PrivateAttr(
@@ -753,6 +778,45 @@ class Dial(_ButtonDialBase, extra="forbid"):  # type: ignore[call-arg]
                     " is not numeric — keeping dial state at 0",
                 )
                 self._attributes["state"] = 0
+
+    def register_turn(self, value: float, now: float | None = None) -> int:
+        """Records a TURN event and returns the acceleration multiplier.
+
+        ``value`` is the signed number of detents of the event. The run of
+        detents grows while events in the same direction follow each other
+        within ``reset_secs``; the multiplier only rises in the direction(s)
+        configured in ``turn_acceleration`` and stays ``1`` otherwise.
+        """
+        if not value:
+            return self._turn_multiplier
+        now = time.monotonic() if now is None else now
+        sign = 1 if value > 0 else -1
+        ticks = max(1, abs(int(value)))
+        cfg = self.turn_acceleration or {}
+        reset_secs = float(cfg.get("reset_secs", 0.25))
+        if sign == self._turn_last_sign and now - self._turn_last_at <= reset_secs:
+            self._turn_streak += ticks
+        else:
+            self._turn_streak = ticks
+        self._turn_last_at = now
+        self._turn_last_sign = sign
+
+        direction = str(cfg.get("direction", "up")).lower()
+        accelerated = self.turn_acceleration is not None and (
+            direction == "both"
+            or (direction == "up" and sign > 0)
+            or (direction == "down" and sign < 0)
+        )
+        if not accelerated:
+            self._turn_multiplier = 1
+            return 1
+        ticks_per_level = max(1, int(cfg.get("ticks_per_level", 3)))
+        max_multiplier = max(1, int(cfg.get("max_multiplier", 6)))
+        self._turn_multiplier = min(
+            max_multiplier,
+            1 + (self._turn_streak - 1) // ticks_per_level,
+        )
+        return self._turn_multiplier
 
     def get_attributes(self) -> dict[str, float]:
         """Returns all home assistant entity attributes."""
@@ -2083,6 +2147,20 @@ def _dial_turn(dial: Dial | None) -> float:
     return float(getattr(dial, "_last_turn_delta", 0) or 0)
 
 
+def _dial_turn_multiplier(dial: Dial | None) -> int:
+    """Template helper — acceleration multiplier of the latest TURN event.
+
+    ``1`` unless the dial sets ``turn_acceleration`` and is being turned
+    quickly in an accelerated direction. Example, 5 minutes per detent that
+    speed up only when increasing::
+
+        duration: "{{ 300 * dial_turn_multiplier() if dial_turn() > 0 else -300 }}"
+    """
+    if dial is None:
+        return 1
+    return int(getattr(dial, "_turn_multiplier", 1) or 1)
+
+
 def _dial_value(dial: Dial | None) -> float:
     if dial is None:
         return 0
@@ -2140,6 +2218,7 @@ def _render_jinja(
             dial_value=ft.partial(_dial_value, dial=dial),
             dial_attr=ft.partial(_dial_attr, dial=dial),
             dial_turn=ft.partial(_dial_turn, dial=dial),
+            dial_turn_multiplier=ft.partial(_dial_turn_multiplier, dial=dial),
             now_ts=_now_ts,
             parse_ts=_parse_ts,
             fmt_hms=_fmt_hms,
@@ -2735,6 +2814,9 @@ async def handle_dial_event(
         # the persistent (pre-render) dial so the next template render
         # picks it up.
         selected_dial._last_turn_delta = float(value)
+        # Debounced TURN dials replay the event with ``value=0``: only real
+        # detents feed the acceleration run.
+        selected_dial.register_turn(value)
     elif value:
         return
 
